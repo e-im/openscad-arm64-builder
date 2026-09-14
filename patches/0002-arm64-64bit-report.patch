@@ -1,0 +1,16 @@
+diff --git a/src/LibraryInfo.cc b/src/LibraryInfo.cc
+index 91d80393a..50cd22753 100644
+--- a/src/LibraryInfo.cc
++++ b/src/LibraryInfo.cc
+@@ -95,9 +95,9 @@ std::string LibraryInfo::info()
+ {
+   std::ostringstream s;
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+   const std::string bits(" 64bit");
+-#elif defined(__i386) || defined(_M_IX86)
++#elif defined(__i386) || defined(_M_IX86) || defined(__arm__) || defined(_M_ARM)
+   const std::string bits(" 32bit");
+ #else
+   const std::string bits("");

@@ -1,0 +1,59 @@
+diff --git a/src/openscad.cc b/src/openscad.cc
+index 494c0260a..ae242235e 100644
+--- a/src/openscad.cc
++++ b/src/openscad.cc
+@@ -35,6 +35,15 @@
+ #include <cassert>
+ #endif
+ #include <libintl.h>
++// Undefine some defines from libintl.h to presolve collisions in
++// boost/standard headers later. Must precede any other include, see
++// src/utils/printutils.h.
++#if defined snprintf
++#undef snprintf
++#endif
++#if defined vsnprintf
++#undef vsnprintf
++#endif
+ 
+ #include <array>
+ #include <boost/algorithm/string/case_conv.hpp>
+diff --git a/src/utils/printutils.h b/src/utils/printutils.h
+index 6d9bcedc8..e3c787157 100644
+--- a/src/utils/printutils.h
++++ b/src/utils/printutils.h
+@@ -2,6 +2,19 @@
+ 
+ #include <libintl.h>
+ 
++// Undefine some defines from libintl.h to presolve
++// some collisions in boost headers later.
++// NB: this must come before ANY C++ standard header is included,
++// otherwise the macros poison <cstdio> inside those headers
++// (breaks e.g. libc++ on Windows ARM64, where std::snprintf then
++// goes missing in boost/assert/source_location.hpp).
++#if defined snprintf
++#undef snprintf
++#endif
++#if defined vsnprintf
++#undef vsnprintf
++#endif
++
+ #include <clocale>
+ #include <cstddef>
+ #include <initializer_list>
+@@ -13,14 +26,6 @@
+ #include <string>
+ #include <tuple>
+ #include <utility>
+-// Undefine some defines from libintl.h to presolve
+-// some collisions in boost headers later
+-#if defined snprintf
+-#undef snprintf
+-#endif
+-#if defined vsnprintf
+-#undef vsnprintf
+-#endif
+ 
+ #include <boost/algorithm/string.hpp>
+ #include <boost/format.hpp>

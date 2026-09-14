@@ -1,0 +1,142 @@
+name: Build
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream ref to build'
+        required: false
+        default: 'master'
+      force:
+        description: 'Rebuild even if the release exists'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+      build_needed: ${{ steps.resolve.outputs.build_needed }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref="${{ inputs.upstream_ref || 'master' }}"
+          sha=$(git ls-remote https://github.com/openscad/openscad.git "refs/heads/$ref" | cut -f1)
+          [ -n "$sha" ] || { echo "cannot resolve upstream ref $ref"; exit 1; }
+          short=${sha:0:7}
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+          echo "short=$short" >> $GITHUB_OUTPUT
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+          elif gh release view "upstream-$short" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "upstream $short already released, skipping"
+            echo "build_needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build_needed == 'true'
+    runs-on: windows-11-arm
+    permissions:
+      contents: write
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5.0G
+      # Make absolute __FILE__ paths + mtimes cache-friendly across runs.
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_SLOPPINESS: file_macro,include_file_ctime,include_file_mtime,pch_defines,time_macros
+      CCACHE_COMPRESS: true
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v7
+        with:
+          path: builder
+          submodules: false
+      - name: Checkout upstream
+        uses: actions/checkout@v7
+        with:
+          repository: openscad/openscad
+          ref: ${{ needs.check.outputs.sha }}
+          submodules: recursive
+          path: upstream
+      - name: Apply patches
+        shell: bash
+        run: |
+          cd upstream
+          for p in ../builder/patches/*.patch; do
+            echo "applying $p"
+            git apply "$p"
+          done
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-arm64-${{ needs.check.outputs.sha }}-${{ hashFiles('builder/scripts/*.sh', 'builder/patches/*.patch') }}
+          restore-keys: |
+            ccache-arm64-${{ needs.check.outputs.sha }}-
+            ccache-arm64-
+      # NOTE: update:false keeps the cached MSYS2 + pacboy packages as-is, so
+      # warm runs skip the ~7min full refresh. Pacboy still installs anything
+      # missing (--needed). Re-run once with update:true if toolchain staleness
+      # is suspected (e.g. monthly, or when upstream needs newer deps).
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: false
+          cache: true
+          install: libxml2
+          pacboy: "qscintilla-qt6:p qt6-5compat:p qt6-multimedia:p qt6-svg:p git: make: bison: flex: toolchain:p cmake:p ninja:p boost:p catch:p cgal:p eigen3:p glew:p opencsg:p lib3mf:p libzip:p mimalloc:p double-conversion:p cairo:p ghostscript:p imagemagick:p tbb:p python:p python-pip:p python-numpy:p python-pillow:p ccache:p ntldd:p"
+      - name: ccache stats (before)
+        shell: msys2 {0}
+        run: |
+          ccache --zero-stats
+          ccache --show-stats
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          ls -la
+          bash builder/scripts/build.sh "${{ github.workspace }}/upstream" "${{ github.workspace }}/dist" ${{ needs.check.outputs.short }}
+          echo "--- dist contents ---"
+          ls -la "${{ github.workspace }}/dist"
+      - name: ccache stats (after)
+        shell: msys2 {0}
+        run: ccache --show-stats
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: openscad-arm64-${{ needs.check.outputs.short }}
+          path: dist/*.zip
+          if-no-files-found: error
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Get-ChildItem "$env:GITHUB_WORKSPACE/dist" -Recurse | Format-Table FullName, Length
+          $zip = Get-ChildItem "$env:GITHUB_WORKSPACE/dist/*.zip" | Select-Object -First 1
+          if (-not $zip) { throw "no zip found in $env:GITHUB_WORKSPACE/dist/" }
+          $tag = "upstream-${{ needs.check.outputs.short }}"
+          $repo = "${{ github.repository }}"
+          if (gh release view $tag --repo $repo 2>$null) {
+            Write-Host "release $tag exists, uploading (clobber)"
+            gh release upload $tag --repo $repo --clobber $zip.FullName
+          } else {
+            gh release create $tag --repo $repo --title "OpenSCAD arm64 @ ${{ needs.check.outputs.short }}" `
+              --notes "Built from openscad/openscad@${{ needs.check.outputs.sha }}." `
+              $zip.FullName
+          }
